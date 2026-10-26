@@ -17,7 +17,7 @@
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V079S';
+  var APP_VER = 'V080S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
@@ -1840,6 +1840,8 @@ function MFGProductionApp() {
   const sbSetters = { productionLogs: setProductionLogs, downtimeLogs: setDowntimeLogs, defectLogs: setDefectLogs, reworkLogs: setReworkLogs, settings: setSettings, employees: setEmployees, oeeTargets: setOeeTargets, lineAssignments: setLineAssignments, slotStatus: setSlotStatus, skillData: setSkillData, absenceReasons: setAbsenceReasons, lotData: setLotData, lotHiddenBoms: setLotHiddenBoms, otVacationData: setOtVacationData, rosterV2: setRosterV2 };
   const sbClient = () => window.MFG_SB || null;
   const sbEmail = () => (window.MFG_USER && window.MFG_USER.email) || '';
+  // 서버(jsonb)는 키 순서를 바꿔 저장하므로, 비교는 키를 정렬한 문자열로 (순서만 다른 것은 같은 것으로)
+  const sbCanon = v => JSON.stringify(v, (k, val) => (val && typeof val === 'object' && !Array.isArray(val)) ? Object.keys(val).sort().reduce((o, kk) => { o[kk] = val[kk]; return o; }, {}) : val);
   const sbErr = e => (e && (e.message || e.error_description || (typeof e === 'string' ? e : JSON.stringify(e)))) || '오류';
   const sbMaxTs = (rows, cur) => rows.reduce((m, r) => (r.updated_at && r.updated_at > m ? r.updated_at : m), cur || '1970-01-01T00:00:00Z');
   const sbFetchAll = async (client, table, mod) => {
@@ -1875,7 +1877,7 @@ function MFGProductionApp() {
           const id = String(row.id), key = kind + ':' + id;
           if (seen.has(key)) return;   // 같은 id 중복 방지
           seen.add(key);
-          const js = JSON.stringify(row);
+          const js = sbCanon(row);
           if (S.synced.logs.get(key) === js) return;
           ups.push({ id, section: SB_SECTION, kind, date: sbRowDate(kind, row, prodById), parent_id: kind === 'production' ? null : (row.productionLogId != null ? String(row.productionLogId) : null), data: row, updated_at: now, updated_by: me, deleted_at: null });
         });
@@ -1887,16 +1889,16 @@ function MFGProductionApp() {
         dels.push({ id: key.slice(i + 1), section: SB_SECTION, kind: key.slice(0, i), data: JSON.parse(js), updated_at: now, updated_by: me, deleted_at: now });
       });
       const sts = [];
-      SB_STATE_KEYS.forEach(k => { const v = L[k]; if (v === undefined) return; const js = JSON.stringify(v); if (S.synced.state.get(k) === js) return; sts.push({ section: SB_SECTION, key: k, data: v, updated_at: now, updated_by: me }); });
+      SB_STATE_KEYS.forEach(k => { const v = L[k]; if (v === undefined) return; const js = sbCanon(v); if (S.synced.state.get(k) === js) return; sts.push({ section: SB_SECTION, key: k, data: v, updated_at: now, updated_by: me }); });
       if (!ups.length && !dels.length && !sts.length) { if (force) setSbStatus({ st: 'ok', msg: '서버 동기화 ' + new Date().toLocaleTimeString() }); return; }
       setSbStatus({ st: 'saving', msg: '서버 저장 중… (' + (ups.length + dels.length + sts.length) + '건)' });
       const CH = 300;
       for (let i = 0; i < ups.length; i += CH) { const { error } = await client.from('prod_logs').upsert(ups.slice(i, i + CH), { onConflict: 'section,kind,id' }); if (error) throw error; }
       for (let i = 0; i < dels.length; i += CH) { const { error } = await client.from('prod_logs').upsert(dels.slice(i, i + CH), { onConflict: 'section,kind,id' }); if (error) throw error; }
       if (sts.length) { const { error } = await client.from('prod_state').upsert(sts, { onConflict: 'section,key' }); if (error) throw error; }
-      ups.forEach(r => S.synced.logs.set(r.kind + ':' + r.id, JSON.stringify(r.data)));
+      ups.forEach(r => S.synced.logs.set(r.kind + ':' + r.id, sbCanon(r.data)));
       dels.forEach(r => S.synced.logs.delete(r.kind + ':' + r.id));
-      sts.forEach(r => S.synced.state.set(r.key, JSON.stringify(r.data)));
+      sts.forEach(r => S.synced.state.set(r.key, sbCanon(r.data)));
       S.fails = 0;
       setSbStatus({ st: 'ok', msg: '서버 저장 ' + new Date().toLocaleTimeString() + ' (' + (ups.length + dels.length + sts.length) + '건)' });
     } catch (e) {
@@ -1919,7 +1921,7 @@ function MFGProductionApp() {
       const states = await sbFetchAll(client, 'prod_state', q => q.gt('updated_at', since));
       let changed = 0; const byKind = {};
       logs.forEach(r => {
-        const key = r.kind + ':' + r.id; const js = r.deleted_at ? null : JSON.stringify(r.data);
+        const key = r.kind + ':' + r.id; const js = r.deleted_at ? null : sbCanon(r.data);
         const prev = S.synced.logs.has(key) ? S.synced.logs.get(key) : null;
         if (prev === js) return;
         (byKind[r.kind] = byKind[r.kind] || []).push(r);
@@ -1927,9 +1929,9 @@ function MFGProductionApp() {
       Object.entries(byKind).forEach(([kind, rows]) => {
         const arrKey = SB_LOG_KINDS[kind]; if (!arrKey) return;
         sbSetters[arrKey](prev => { const m = new Map((prev || []).map(x => [String(x.id), x])); rows.forEach(r => { if (r.deleted_at) m.delete(String(r.id)); else m.set(String(r.id), r.data); }); return Array.from(m.values()); });
-        rows.forEach(r => { const key = kind + ':' + r.id; if (r.deleted_at) S.synced.logs.delete(key); else S.synced.logs.set(key, JSON.stringify(r.data)); changed++; });
+        rows.forEach(r => { const key = kind + ':' + r.id; if (r.deleted_at) S.synced.logs.delete(key); else S.synced.logs.set(key, sbCanon(r.data)); changed++; });
       });
-      states.forEach(r => { const js = JSON.stringify(r.data); if (S.synced.state.get(r.key) === js) return; if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, js); changed++; } });
+      states.forEach(r => { const js = sbCanon(r.data); if (S.synced.state.get(r.key) === js) return; if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, js); changed++; } });
       S.lastPull = sbMaxTs(logs.concat(states), S.lastPull);
       if (changed) setSbStatus({ st: 'ok', msg: '서버에서 갱신 ' + new Date().toLocaleTimeString() + ' (' + changed + '건)' });
       else if (sbStatus.st === 'error') setSbStatus({ st: 'ok', msg: '서버 연결됨 ' + new Date().toLocaleTimeString() });
@@ -1950,10 +1952,10 @@ function MFGProductionApp() {
       return;
     }
     const arrs = { productionLogs: [], downtimeLogs: [], defectLogs: [], reworkLogs: [] };
-    logs.forEach(r => { const k = SB_LOG_KINDS[r.kind]; if (!k) return; arrs[k].push(r.data); S.synced.logs.set(r.kind + ':' + r.id, JSON.stringify(r.data)); });
+    logs.forEach(r => { const k = SB_LOG_KINDS[r.kind]; if (!k) return; arrs[k].push(r.data); S.synced.logs.set(r.kind + ':' + r.id, sbCanon(r.data)); });
     Object.keys(arrs).forEach(k => sbSetters[k](arrs[k]));
     setProcessDefectLogs([]);
-    states.forEach(r => { if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, JSON.stringify(r.data)); } });
+    states.forEach(r => { if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, sbCanon(r.data)); } });
     S.lastPull = sbMaxTs(logs.concat(states), '1970-01-01T00:00:00Z');
     S.ready = true;
     setSbStatus({ st: 'ok', msg: '서버 불러옴 ' + new Date().toLocaleTimeString() + ' (' + logs.length + '건)' });
@@ -4274,7 +4276,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V079S"))));
+    }, "V080S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4322,7 +4324,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V079S")), React.createElement("div", {
+  }, "V080S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
