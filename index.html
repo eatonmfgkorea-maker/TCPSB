@@ -17,7 +17,7 @@
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V082S';
+  var APP_VER = 'V083S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
@@ -1864,7 +1864,7 @@ function MFGProductionApp() {
   const sbGateMsg = m => { const el = document.getElementById('mfgSbGateMsg'); if (el) el.textContent = m; };
   // 1,000건씩 나눠 받되 6쪽씩 동시에 (기본키 순으로 나눠서 받는 중에 수정돼도 순서가 안 바뀜)
   const sbFetchAll = async (client, table, mod, onPage) => {
-    const PAGE = 1000, PAR = 6;
+    const PAGE = 1000, PAR = 4;
     const cols = table === 'prod_logs' ? 'kind,id,data,updated_at,deleted_at' : 'key,data,updated_at';
     const q = (from, withCount) => {
       let x = client.from(table).select(cols, withCount ? { count: 'exact' } : undefined).eq('section', SB_SECTION);
@@ -1872,18 +1872,20 @@ function MFGProductionApp() {
       x = table === 'prod_logs' ? x.order('kind', { ascending: true }).order('id', { ascending: true }) : x.order('key', { ascending: true });
       return x.range(from, from + PAGE - 1);
     };
-    const first = await q(0, true);
+    // 한 쪽이 실패하면 1초·2초 쉬고 3번까지 다시
+    const qr = async (from, withCount) => { let last; for (let t = 0; t < 3; t++) { if (t) await new Promise(r => setTimeout(r, 1000 * t)); const r = await q(from, withCount); if (!r.error) return r; last = r; } return last; };
+    const first = await qr(0, true);
     if (first.error) throw first.error;
     const out = (first.data || []).slice();
     const total = first.count;
     if (onPage) onPage(out.length, total || out.length);
     if (total == null) {
-      for (let f = PAGE; out.length === f; f += PAGE) { const r = await q(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, out.length); if (!r.data || r.data.length < PAGE) break; }
+      for (let f = PAGE; out.length === f; f += PAGE) { const r = await qr(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, out.length); if (!r.data || r.data.length < PAGE) break; }
       return out;
     }
     const offs = []; for (let f = PAGE; f < total; f += PAGE) offs.push(f);
     let i = 0;
-    const worker = async () => { while (i < offs.length) { const f = offs[i++]; const r = await q(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, total); } };
+    const worker = async () => { while (i < offs.length) { const f = offs[i++]; const r = await qr(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, total); } };
     await Promise.all(Array.from({ length: Math.min(PAR, offs.length) }, worker));
     return out;
   };
@@ -4354,7 +4356,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V082S"))));
+    }, "V083S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4402,7 +4404,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V082S")), React.createElement("div", {
+  }, "V083S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
