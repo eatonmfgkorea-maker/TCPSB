@@ -17,15 +17,41 @@
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V083S';
+  var APP_VER = 'V084S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
   var PORTAL_URL = 'https://eatonmfgkorea-maker.github.io/MFGManagement/';
 
   function getCfg() { try { var s = JSON.parse(localStorage.getItem(CFG_KEY) || 'null'); if (s && s.url && s.key) return s; } catch (e) {} return { url: SB_DEFAULT_URL, key: SB_DEFAULT_KEY }; }
+  // 로그인 정보는 IndexedDB에 저장 — localStorage(5MB)는 같은 사이트의 여러 앱이 나눠 써서 꽉 차면 로그인이 저장되지 않음
+  var authStore = (function() {
+    var dbp = null;
+    function db() {
+      if (!dbp) dbp = new Promise(function(res, rej) {
+        var r = indexedDB.open('mfg_sb_auth', 1);
+        r.onupgradeneeded = function() { r.result.createObjectStore('kv'); };
+        r.onsuccess = function() { res(r.result); };
+        r.onerror = function() { rej(r.error); };
+      });
+      return dbp;
+    }
+    function run(mode, fn) {
+      return db().then(function(d) { return new Promise(function(res, rej) {
+        var t = d.transaction('kv', mode), q = fn(t.objectStore('kv'));
+        t.oncomplete = function() { res(q ? q.result : undefined); };
+        t.onerror = function() { rej(t.error); };
+      }); });
+    }
+    function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+    return {
+      getItem: function(k) { return run('readonly', function(s) { return s.get(k); }).then(function(v) { return v != null ? v : lsGet(k); }, function() { return lsGet(k); }); },
+      setItem: function(k, v) { try { localStorage.setItem(k, v); } catch (e) {} return run('readwrite', function(s) { return s.put(v, k); }).catch(function() {}); },
+      removeItem: function(k) { try { localStorage.removeItem(k); } catch (e) {} return run('readwrite', function(s) { return s.delete(k); }).catch(function() {}); }
+    };
+  })();
   var cfg = getCfg(), client = null;
-  try { client = window.supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: AUTH_KEY } }); } catch (e) { console.error('서버 연결 초기화 실패', e); }
+  try { client = window.supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: AUTH_KEY, storage: authStore } }); } catch (e) { console.error('서버 연결 초기화 실패', e); }
   window.MFG_SB = client; window.MFG_USER = null;
   var resolveReady; window.__sbReady = new Promise(function(r) { resolveReady = r; });
   var errText = function(e) { if (!e) return '알 수 없는 오류'; var m = e.message || e.error_description || String(e); return /invalid login credentials/i.test(m) ? '이메일 또는 비밀번호가 올바르지 않습니다.' : m; };
@@ -4356,7 +4382,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V083S"))));
+    }, "V084S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4404,7 +4430,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V083S")), React.createElement("div", {
+  }, "V084S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
