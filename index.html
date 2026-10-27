@@ -12,12 +12,12 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body, #root { height: 100%; }
   </style>
-<!-- ==================== MFG 서버 인증 (Supabase 이메일+비밀번호, 자기완결) ==================== -->
+<!-- ==================== MFG 서버 인증 (이름+비밀번호, 자기완결) ==================== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V085S';
+  var APP_VER = 'V086S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
@@ -62,7 +62,16 @@
   window.MFG_SB = client; window.MFG_USER = null;
   if (ALLOW_GUEST && isGuestFlag()) window.MFG_USER = { email: '', name: '게스트', role: 'guest', isAdmin: false, isGuest: true, logout: function() { setGuestFlag(false); location.reload(); } };
   var resolveReady; window.__sbReady = new Promise(function(r) { resolveReady = r; });
-  var errText = function(e) { if (!e) return '알 수 없는 오류'; var m = e.message || e.error_description || String(e); return /invalid login credentials/i.test(m) ? '이메일 또는 비밀번호가 올바르지 않습니다.' : m; };
+  var errText = function(e) { if (!e) return '알 수 없는 오류'; var m = e.message || e.error_description || String(e); return /invalid login credentials/i.test(m) ? '이름 또는 비밀번호가 올바르지 않습니다.' : m; };
+  // 이름 → 내부 로그인 주소 (SQL login_email과 같은 규칙). '@'가 있으면 그대로
+  function idToEmail(id) {
+    id = String(id || '').trim();
+    if (id.indexOf('@') >= 0) return id.toLowerCase();
+    var b = new TextEncoder().encode(id), h = '';
+    for (var i = 0; i < b.length; i++) h += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+    return 'u-' + h + '@mfg.local';
+  }
+  function esc(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   function $(id) { return document.getElementById(id); }
   var inp = 'width:100%;padding:0.6rem 0.75rem;border-radius:0.5rem;border:1px solid #475569;background:#0b1220;color:#e2e8f0;font-size:0.9rem;box-sizing:border-box;';
@@ -77,9 +86,9 @@
       '<div style="background:#0f172a;border:1px solid rgba(255,255,255,0.1);border-radius:1rem;padding:2rem;width:100%;max-width:24rem;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);text-align:center;">' +
         '<h2 style="font-size:1.3rem;font-weight:bold;color:#fff;margin:0;">' + APP_NAME + '</h2>' +
         '<div style="display:inline-block;margin:0.4rem 0 0.2rem;padding:1px 10px;border-radius:6px;background:#fff;color:#111827;font-size:0.75rem;font-weight:800;letter-spacing:1px;">' + APP_VER + '</div>' +
-        '<p style="font-size:0.85rem;color:#94a3b8;margin:0.5rem 0 1.25rem;">승인된 계정으로 로그인하세요</p>' +
+        '<p id="mfgAuthSub" style="font-size:0.85rem;color:#94a3b8;margin:0.5rem 0 1.25rem;">이름과 비밀번호를 입력하세요</p>' +
         '<form id="mfgLoginForm" style="display:flex;flex-direction:column;gap:0.5rem;text-align:left;">' +
-          '<input id="mfgEmail" type="email" placeholder="이메일" autocomplete="username" style="' + inp + '">' +
+          '<input id="mfgEmail" type="text" placeholder="이름" autocomplete="username" style="' + inp + '">' +
           '<input id="mfgPw" type="password" placeholder="비밀번호" autocomplete="current-password" style="' + inp + '">' +
           '<button id="mfgLoginBtn" type="submit" style="' + btn + 'margin-top:0.25rem;">로그인</button>' +
         '</form>' +
@@ -91,7 +100,7 @@
       '</div>';
     document.body.appendChild(div);
     document.body.style.overflow = 'hidden';
-    try { $('mfgEmail').value = localStorage.getItem(LAST_EMAIL) || ''; } catch (e) {}
+    try { var last = localStorage.getItem(LAST_EMAIL) || ''; $('mfgEmail').value = /@mfg\.local$/.test(last) ? '' : last; } catch (e) {}
     $('mfgLoginForm').addEventListener('submit', function(ev) { ev.preventDefault(); doLogin(); });
     if ($('mfgGuestBtn')) $('mfgGuestBtn').addEventListener('click', function() { setGuestFlag(true); enterGuest(); });
     ($('mfgEmail').value ? $('mfgPw') : $('mfgEmail')).focus();
@@ -111,27 +120,70 @@
     ensureGear();
     resolveReady(window.MFG_USER);
   }
-  function finishLogin(email) {
-    return client.rpc('my_role').then(function(r) {
+  function myAccount() {
+    return client.rpc('my_account').then(function(r) {
+      if (r.error && /my_account|PGRST202|function/i.test((r.error.code || '') + ' ' + (r.error.message || ''))) {   // SQL 실행 전 호환
+        return client.rpc('my_role').then(function(r2) { if (r2.error) throw r2.error; return r2.data ? { role: r2.data, login_id: '', must_change: false } : null; });
+      }
       if (r.error) throw r.error;
-      if (!r.data) { return client.auth.signOut().then(function() { throw { message: '<b>' + email + '</b><br>승인되지 않은 계정입니다. 관리자에게 승인을 요청하세요.' }; }); }
-      setGuestFlag(false);
-      window.MFG_USER = { email: email, role: r.data, isAdmin: r.data === 'admin', logout: logout };
-      removeOverlay();
-      ensureGear();
-      resolveReady(window.MFG_USER);
+      return r.data || null;
     });
   }
+  function finishLogin(email, pw) {
+    return myAccount().then(function(a) {
+      if (!a || !a.role) { return client.auth.signOut().then(function() { throw { message: '승인되지 않은 계정입니다. 관리자에게 요청하세요.' }; }); }
+      setGuestFlag(false);
+      window.MFG_USER = { email: email, name: a.login_id || email, role: a.role, isAdmin: a.role === 'admin', logout: logout };
+      if (a.must_change) return firstPwChange(pw);
+      enterApp();
+    });
+  }
+  function enterApp() {
+    removeOverlay();
+    ensureGear();
+    resolveReady(window.MFG_USER);
+  }
+  // 처음 접속(또는 비밀번호 초기화 후): 본인 비밀번호로 바꿔야 앱이 열림
+  function firstPwChange(oldPw) {
+    overlay();
+    var f = $('mfgLoginForm'); if (!f) return;
+    if ($('mfgGuestBtn')) { $('mfgGuestBtn').nextSibling && $('mfgGuestBtn').nextSibling.remove(); $('mfgGuestBtn').remove(); }
+    $('mfgAuthSub').innerHTML = '<b style="color:#fff;">' + esc(window.MFG_USER.name) + '</b>님, 처음 접속입니다.<br>사용할 비밀번호로 바꿔 주세요.';
+    f.innerHTML =
+      (oldPw ? '' : '<input id="mfgPwOld" type="password" placeholder="받은 초기 비밀번호" autocomplete="current-password" style="' + inp + '">') +
+      '<input id="mfgPwNew" type="password" placeholder="새 비밀번호 (6자 이상)" autocomplete="new-password" style="' + inp + '">' +
+      '<input id="mfgPwNew2" type="password" placeholder="새 비밀번호 확인" autocomplete="new-password" style="' + inp + '">' +
+      '<button id="mfgLoginBtn" type="submit" style="' + btn + 'margin-top:0.25rem;">비밀번호 변경</button>' +
+      '<button id="mfgPwCancel" type="button" style="width:100%;padding:0.5rem;border:0;background:none;color:#94a3b8;font-size:0.8rem;cursor:pointer;">다른 이름으로 로그인</button>';
+    var fresh = f.cloneNode(true); f.parentNode.replaceChild(fresh, f); f = fresh;   // 로그인 submit 핸들러 제거
+    $('mfgAuthMsg').style.display = 'none';
+    $('mfgPwCancel').addEventListener('click', function() { client.auth.signOut().then(function() { location.reload(); }, function() { location.reload(); }); });
+    f.addEventListener('submit', function(ev) {
+      ev.preventDefault();
+      var o = oldPw || ($('mfgPwOld') && $('mfgPwOld').value) || '', n = $('mfgPwNew').value || '', n2 = $('mfgPwNew2').value || '';
+      if (!oldPw && !o) { msg('초기 비밀번호를 입력하세요.', 'err'); return; }
+      if (n.length < 6) { msg('새 비밀번호는 6자 이상이어야 합니다.', 'err'); return; }
+      if (n !== n2) { msg('새 비밀번호 확인이 다릅니다.', 'err'); return; }
+      $('mfgLoginBtn').disabled = true; msg('변경 중...', 'info');
+      client.rpc('change_my_password', { p_old: o, p_new: n }).then(function(r) {
+        if (r.error) throw r.error;
+        msg('비밀번호를 바꿨습니다.', 'ok');
+        setTimeout(enterApp, 400);
+      }).catch(function(e) { msg(errText(e), 'err'); var b = $('mfgLoginBtn'); if (b) b.disabled = false; });
+    });
+    ($('mfgPwOld') || $('mfgPwNew')).focus();
+  }
   function doLogin() {
-    var em = ($('mfgEmail').value || '').trim().toLowerCase(), pw = $('mfgPw').value || '';
-    if (!em || !pw) { msg('이메일과 비밀번호를 입력하세요.', 'err'); return; }
+    var id = ($('mfgEmail').value || '').trim(), pw = $('mfgPw').value || '';
+    if (!id || !pw) { msg('이름과 비밀번호를 입력하세요.', 'err'); return; }
+    var em = idToEmail(id);
     if (!client) { msg('서버에 연결하지 못했습니다. 새로고침해 보세요.', 'err'); return; }
     $('mfgLoginBtn').disabled = true; msg('확인 중...', 'info');
     client.auth.signInWithPassword({ email: em, password: pw }).then(function(r) {
       if (r.error) throw r.error;
-      try { localStorage.setItem(LAST_EMAIL, em); } catch (e) {}
-      return finishLogin(em);
-    }).then(function() { msg('로그인 성공', 'ok'); }).catch(function(e) { msg(errText(e), 'err'); })
+      try { localStorage.setItem(LAST_EMAIL, id); } catch (e) {}
+      return finishLogin(em, pw);
+    }).catch(function(e) { msg(errText(e), 'err'); })
       .then(function() { var b = $('mfgLoginBtn'); if (b) b.disabled = false; });
   }
   function logout() {
@@ -152,44 +204,85 @@
   function openSettings() {
     if ($('mfgCfgModal')) return;
     var u = window.MFG_USER;
+    var inpL = inp.replace('#0b1220', '#fff').replace('#e2e8f0', '#1e293b').replace('#475569', '#cbd5e1');
+    var sbtn = 'padding:0.3rem 0.7rem;border:1px solid #cbd5e1;border-radius:0.4rem;background:#fff;cursor:pointer;font-size:0.82rem;';
     var m = document.createElement('div');
     m.id = 'mfgCfgModal';
     m.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,0.55);display:flex;align-items:center;justify-content:center;padding:1rem;font-family:Pretendard,"Malgun Gothic",-apple-system,sans-serif;';
     m.innerHTML =
       '<div style="background:#fff;border-radius:0.9rem;padding:1.25rem 1.4rem;width:100%;max-width:30rem;max-height:92vh;overflow:auto;color:#1e293b;font-size:0.9rem;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;"><b style="font-size:1.05rem;">⚙️ 계정</b><button id="mfgCfgClose" type="button" style="border:0;background:none;font-size:1.2rem;cursor:pointer;">✕</button></div>' +
-        (u ? '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0.75rem;background:#f1f5f9;border-radius:0.5rem;margin-bottom:0.9rem;"><span>' + (u.isGuest ? '게스트 <span style="color:#64748b;font-size:0.8rem;">(보기 전용)</span>' : u.email + ' <span style="color:#64748b;font-size:0.8rem;">(' + (u.isAdmin ? '관리자' : '사용자') + ')</span>') + '</span><button id="mfgLogoutBtn" type="button" style="padding:0.3rem 0.7rem;border:1px solid #cbd5e1;border-radius:0.4rem;background:#fff;cursor:pointer;">' + (u.isGuest ? '로그인하기' : '로그아웃') + '</button></div>' : '') +
-        (u && u.isAdmin ? '<div style="font-weight:600;margin-bottom:0.3rem;">승인 사용자</div><div id="mfgApprList" style="border:1px solid #e2e8f0;border-radius:0.5rem;max-height:14rem;overflow:auto;margin-bottom:0.5rem;"></div>' +
-          '<div style="display:flex;gap:0.4rem;"><input id="mfgApprEmail" placeholder="이메일" style="' + inp.replace('#0b1220', '#fff').replace('#e2e8f0', '#1e293b').replace('#475569', '#cbd5e1') + 'flex:1;"><select id="mfgApprRole" style="border:1px solid #cbd5e1;border-radius:0.5rem;padding:0 0.4rem;"><option value="user">사용자</option><option value="admin">관리자</option></select><button id="mfgApprAdd" type="button" style="' + btn + 'width:auto;padding:0.45rem 0.8rem;">추가</button></div>' +
-          '<div style="font-size:0.78rem;color:#64748b;margin-top:0.5rem;">계정 생성은 Supabase → Authentication → Users → Add user (Auto Confirm 체크). 여기서는 승인 여부와 역할만 관리합니다.</div>' : '') +
+        (u ? '<div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;padding:0.6rem 0.75rem;background:#f1f5f9;border-radius:0.5rem;margin-bottom:0.9rem;"><span>' + (u.isGuest ? '게스트 <span style="color:#64748b;font-size:0.8rem;">(보기 전용)</span>' : esc(u.name || u.email) + ' <span style="color:#64748b;font-size:0.8rem;">(' + (u.isAdmin ? '관리자' : '사용자') + ')</span>') + '</span><span style="display:flex;gap:0.3rem;">' +
+          (u.isGuest ? '' : '<button id="mfgPwBtn" type="button" style="' + sbtn + '">비밀번호 변경</button>') +
+          '<button id="mfgLogoutBtn" type="button" style="' + sbtn + '">' + (u.isGuest ? '로그인하기' : '로그아웃') + '</button></span></div>' : '') +
+        (u && !u.isGuest ? '<form id="mfgPwForm" style="display:none;flex-direction:column;gap:0.4rem;margin-bottom:0.9rem;">' +
+          '<input id="mfgPwCur" type="password" placeholder="현재 비밀번호" autocomplete="current-password" style="' + inpL + '">' +
+          '<input id="mfgPwN1" type="password" placeholder="새 비밀번호 (6자 이상)" autocomplete="new-password" style="' + inpL + '">' +
+          '<input id="mfgPwN2" type="password" placeholder="새 비밀번호 확인" autocomplete="new-password" style="' + inpL + '">' +
+          '<button type="submit" style="' + btn + '">변경</button><div id="mfgPwMsg" style="font-size:0.82rem;"></div></form>' : '') +
+        (u && u.isAdmin ? '<div style="font-weight:600;margin-bottom:0.3rem;">사용자</div><div id="mfgApprList" style="border:1px solid #e2e8f0;border-radius:0.5rem;max-height:16rem;overflow:auto;margin-bottom:0.5rem;"></div>' +
+          '<div style="display:flex;gap:0.4rem;flex-wrap:wrap;"><input id="mfgNewId" placeholder="이름" style="' + inpL + 'flex:1 1 6rem;"><input id="mfgNewPw" placeholder="초기 비밀번호" style="' + inpL + 'flex:1 1 6rem;"><select id="mfgApprRole" style="border:1px solid #cbd5e1;border-radius:0.5rem;padding:0 0.4rem;"><option value="user">사용자</option><option value="admin">관리자</option></select><button id="mfgApprAdd" type="button" style="' + btn + 'width:auto;padding:0.45rem 0.8rem;">추가</button></div>' +
+          '<div id="mfgAdmMsg" style="font-size:0.8rem;color:#64748b;margin-top:0.5rem;">초기 비밀번호를 알려주면, 처음 로그인할 때 본인 비밀번호로 바꾸게 됩니다.</div>' : '') +
       '</div>';
     document.body.appendChild(m);
     $('mfgCfgClose').addEventListener('click', function() { m.remove(); });
     m.addEventListener('click', function(ev) { if (ev.target === m) m.remove(); });
     if ($('mfgLogoutBtn')) $('mfgLogoutBtn').addEventListener('click', u && u.isGuest ? u.logout : logout);
+    if ($('mfgPwBtn')) {
+      $('mfgPwBtn').addEventListener('click', function() { var f = $('mfgPwForm'); f.style.display = f.style.display === 'none' ? 'flex' : 'none'; if (f.style.display === 'flex') $('mfgPwCur').focus(); });
+      $('mfgPwForm').addEventListener('submit', function(ev) {
+        ev.preventDefault();
+        var o = $('mfgPwCur').value, n = $('mfgPwN1').value, n2 = $('mfgPwN2').value, out = $('mfgPwMsg');
+        var say = function(t, ok) { out.textContent = t; out.style.color = ok ? '#059669' : '#dc2626'; };
+        if (n.length < 6) return say('새 비밀번호는 6자 이상이어야 합니다.');
+        if (n !== n2) return say('새 비밀번호 확인이 다릅니다.');
+        client.rpc('change_my_password', { p_old: o, p_new: n }).then(function(r) {
+          if (r.error) return say(errText(r.error));
+          say('비밀번호를 바꿨습니다.', true); $('mfgPwCur').value = $('mfgPwN1').value = $('mfgPwN2').value = '';
+        });
+      });
+    }
     if (u && u.isAdmin) {
+      var amsg = function(t, ok) { var el = $('mfgAdmMsg'); if (el) { el.textContent = t; el.style.color = ok ? '#059669' : '#dc2626'; } };
       var list = function() {
-        client.from('approved_users').select('email,role').order('email').then(function(r) {
+        client.from('approved_users').select('email,role,login_id,must_change').order('login_id').then(function(r) {
           var el = $('mfgApprList'); if (!el) return;
-          if (r.error) { el.innerHTML = '<div style="padding:0.5rem;color:#dc2626;">' + errText(r.error) + '</div>'; return; }
+          if (r.error) { el.innerHTML = '<div style="padding:0.5rem;color:#dc2626;">' + esc(errText(r.error)) + '</div>'; return; }
           el.innerHTML = (r.data || []).map(function(x) {
-            return '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.35rem 0.6rem;border-bottom:1px solid #f1f5f9;"><span>' + x.email + ' <span style="color:#64748b;font-size:0.78rem;">' + (x.role === 'admin' ? '관리자' : '사용자') + '</span></span>' +
-              (x.email === u.email ? '' : '<button type="button" data-em="' + x.email + '" style="border:0;background:none;color:#dc2626;cursor:pointer;">삭제</button>') + '</div>';
+            var me = x.email === u.email;
+            return '<div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;padding:0.35rem 0.6rem;border-bottom:1px solid #f1f5f9;"><span>' + esc(x.login_id || x.email) +
+              ' <span style="color:#64748b;font-size:0.78rem;">' + (x.role === 'admin' ? '관리자' : '사용자') + (x.must_change ? ' · 첫 로그인 전' : '') + '</span></span><span style="display:flex;gap:0.6rem;">' +
+              '<button type="button" data-reset="' + esc(x.email) + '" data-name="' + esc(x.login_id || x.email) + '" style="border:0;background:none;color:#2563eb;cursor:pointer;font-size:0.82rem;">비밀번호 초기화</button>' +
+              (me ? '' : '<button type="button" data-del="' + esc(x.email) + '" data-name="' + esc(x.login_id || x.email) + '" style="border:0;background:none;color:#dc2626;cursor:pointer;font-size:0.82rem;">삭제</button>') + '</span></div>';
           }).join('') || '<div style="padding:0.5rem;color:#64748b;">없음</div>';
-          el.querySelectorAll('button[data-em]').forEach(function(b) {
+          el.querySelectorAll('button[data-reset]').forEach(function(b) {
             b.addEventListener('click', function() {
-              var em = b.getAttribute('data-em');
-              if (!confirm(em + ' 승인을 해제하시겠습니까?')) return;
-              client.from('approved_users').delete().eq('email', em).then(function(r2) { if (r2.error) alert('삭제 실패: ' + errText(r2.error)); list(); });
+              var pw = prompt(b.getAttribute('data-name') + ' — 새 초기 비밀번호 (6자 이상):');
+              if (!pw) return;
+              client.rpc('admin_reset_password', { p_email: b.getAttribute('data-reset'), p_password: pw }).then(function(r2) {
+                if (r2.error) amsg('초기화 실패: ' + errText(r2.error)); else amsg(b.getAttribute('data-name') + ' 비밀번호를 초기화했습니다. 다음 로그인 때 본인 비밀번호로 바꾸게 됩니다.', true);
+                list();
+              });
+            });
+          });
+          el.querySelectorAll('button[data-del]').forEach(function(b) {
+            b.addEventListener('click', function() {
+              if (!confirm(b.getAttribute('data-name') + ' 계정을 삭제하시겠습니까?')) return;
+              client.rpc('admin_delete_user', { p_email: b.getAttribute('data-del') }).then(function(r2) { if (r2.error) amsg('삭제 실패: ' + errText(r2.error)); else amsg('삭제했습니다.', true); list(); });
             });
           });
         });
       };
       list();
       $('mfgApprAdd').addEventListener('click', function() {
-        var em = ($('mfgApprEmail').value || '').trim().toLowerCase(), role = $('mfgApprRole').value;
-        if (!em || em.indexOf('@') < 0) { alert('이메일을 입력하세요.'); return; }
-        client.from('approved_users').upsert({ email: em, role: role }).then(function(r) { if (r.error) { alert('추가 실패: ' + errText(r.error)); return; } $('mfgApprEmail').value = ''; list(); });
+        var id = ($('mfgNewId').value || '').trim(), pw = $('mfgNewPw').value || '', role = $('mfgApprRole').value;
+        if (id.length < 2) { amsg('이름을 입력하세요.'); return; }
+        if (pw.length < 6) { amsg('초기 비밀번호는 6자 이상이어야 합니다.'); return; }
+        client.rpc('admin_create_user', { p_id: id, p_password: pw, p_role: role }).then(function(r) {
+          if (r.error) { amsg('추가 실패: ' + errText(r.error)); return; }
+          $('mfgNewId').value = ''; $('mfgNewPw').value = '';
+          amsg(id + ' 추가했습니다. 초기 비밀번호를 알려주세요.', true); list();
+        });
       });
     }
   }
@@ -198,7 +291,7 @@
     if (!client) { overlay(); msg('서버에 연결하지 못했습니다. 새로고침해 보세요.', 'err'); return; }
     client.auth.getSession().then(function(r) {
       var s = r && r.data && r.data.session;
-      if (s && s.user && s.user.email) return finishLogin(String(s.user.email).toLowerCase());
+      if (s && s.user && s.user.email) return finishLogin(String(s.user.email).toLowerCase(), '');
       if (ALLOW_GUEST && isGuestFlag()) { enterGuest(); return; }
       overlay();
     }).catch(function(e) { overlay(); msg(errText(e), 'err'); });
@@ -4387,7 +4480,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V085S"))));
+    }, "V086S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4435,7 +4528,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V085S")), React.createElement("div", {
+  }, "V086S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
