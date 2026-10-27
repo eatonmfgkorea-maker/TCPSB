@@ -17,7 +17,7 @@
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V081S';
+  var APP_VER = 'V082S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
@@ -1862,18 +1862,40 @@ function MFGProductionApp() {
     if (retry) document.getElementById('mfgSbGateRetry').onclick = retry;
   };
   const sbGateMsg = m => { const el = document.getElementById('mfgSbGateMsg'); if (el) el.textContent = m; };
+  // 1,000건씩 나눠 받되 6쪽씩 동시에 (기본키 순으로 나눠서 받는 중에 수정돼도 순서가 안 바뀜)
   const sbFetchAll = async (client, table, mod, onPage) => {
-    const out = []; const PAGE = 1000;
-    for (let from = 0; ; from += PAGE) {
-      let q = client.from(table).select('*').eq('section', SB_SECTION).order('updated_at', { ascending: true }).range(from, from + PAGE - 1);
-      q = mod ? mod(q) : q;
-      const { data, error } = await q;
-      if (error) throw error;
-      out.push(...(data || []));
-      if (onPage) onPage(out.length);
-      if (!data || data.length < PAGE) break;
+    const PAGE = 1000, PAR = 6;
+    const cols = table === 'prod_logs' ? 'kind,id,data,updated_at,deleted_at' : 'key,data,updated_at';
+    const q = (from, withCount) => {
+      let x = client.from(table).select(cols, withCount ? { count: 'exact' } : undefined).eq('section', SB_SECTION);
+      x = mod ? mod(x) : x;
+      x = table === 'prod_logs' ? x.order('kind', { ascending: true }).order('id', { ascending: true }) : x.order('key', { ascending: true });
+      return x.range(from, from + PAGE - 1);
+    };
+    const first = await q(0, true);
+    if (first.error) throw first.error;
+    const out = (first.data || []).slice();
+    const total = first.count;
+    if (onPage) onPage(out.length, total || out.length);
+    if (total == null) {
+      for (let f = PAGE; out.length === f; f += PAGE) { const r = await q(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, out.length); if (!r.data || r.data.length < PAGE) break; }
+      return out;
     }
+    const offs = []; for (let f = PAGE; f < total; f += PAGE) offs.push(f);
+    let i = 0;
+    const worker = async () => { while (i < offs.length) { const f = offs[i++]; const r = await q(f); if (r.error) throw r.error; out.push(...(r.data || [])); if (onPage) onPage(out.length, total); } };
+    await Promise.all(Array.from({ length: Math.min(PAR, offs.length) }, worker));
     return out;
+  };
+  // 서버에서 받은 상태를 이 PC에 보관 → 다음에 열 때는 바뀐 것만 받음
+  const SB_CACHE_KEY = 'sbSyncCache';
+  const sbCacheTimer = React.useRef(null);
+  const sbCacheSave = () => {
+    clearTimeout(sbCacheTimer.current);
+    sbCacheTimer.current = setTimeout(() => {
+      const S = sbRef.current; const client = sbClient(); if (!S.ready || !client) return;
+      saveToIndexedDB(SB_CACHE_KEY, { v: 1, url: client.supabaseUrl || '', section: SB_SECTION, logs: Array.from(S.synced.logs.entries()), state: Array.from(S.synced.state.entries()), lastPull: S.lastPull, savedAt: Date.now() }).catch(() => {});
+    }, 2000);
   };
   const sbRowDate = (kind, row, prodById) => {
     if (kind === 'production') return row.productionDate || null;
@@ -1919,6 +1941,7 @@ function MFGProductionApp() {
       dels.forEach(r => S.synced.logs.delete(r.kind + ':' + r.id));
       sts.forEach(r => S.synced.state.set(r.key, sbCanon(r.data)));
       S.fails = 0;
+      sbCacheSave();
       setSbStatus({ st: 'ok', msg: '서버 저장 ' + new Date().toLocaleTimeString() + ' (' + (ups.length + dels.length + sts.length) + '건)' });
     } catch (e) {
       console.error('서버 저장 실패', e);
@@ -1931,9 +1954,9 @@ function MFGProductionApp() {
     }
   };
   // 서버 변경분 받아 합치기 (다른 PC의 입력)
-  const sbPullDelta = async () => {
+  const sbPullDelta = async strict => {
     const S = sbRef.current; const client = sbClient();
-    if (!client || !S.ready || S.pushing) return;
+    if (!client || !S.ready || (S.pushing && !strict)) return;
     try {
       const since = S.lastPull;
       const logs = await sbFetchAll(client, 'prod_logs', q => q.gt('updated_at', since));
@@ -1952,16 +1975,38 @@ function MFGProductionApp() {
       });
       states.forEach(r => { const js = sbCanon(r.data); if (S.synced.state.get(r.key) === js) return; if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, js); changed++; } });
       S.lastPull = sbMaxTs(logs.concat(states), S.lastPull);
-      if (changed) setSbStatus({ st: 'ok', msg: '서버에서 갱신 ' + new Date().toLocaleTimeString() + ' (' + changed + '건)' });
-      else if (sbStatus.st === 'error') setSbStatus({ st: 'ok', msg: '서버 연결됨 ' + new Date().toLocaleTimeString() });
-    } catch (e) { console.warn('서버 변경 확인 실패', e); setSbStatus({ st: 'error', msg: '서버 연결 실패: ' + sbErr(e) }); }
+      if (changed) { setSbStatus({ st: 'ok', msg: '서버에서 갱신 ' + new Date().toLocaleTimeString() + ' (' + changed + '건)' }); sbCacheSave(); }
+      else if (sbStatus.st === 'error' || strict) setSbStatus({ st: 'ok', msg: '서버 연결됨 ' + new Date().toLocaleTimeString() });
+      return changed;
+    } catch (e) { console.warn('서버 변경 확인 실패', e); setSbStatus({ st: 'error', msg: '서버 연결 실패: ' + sbErr(e) }); if (strict) throw e; }
   };
   // 시작: 서버 전체 받기
   const sbPullAll = async () => {
     const S = sbRef.current; const client = sbClient(); if (!client) return;
     setSbStatus({ st: 'loading', msg: '서버에서 불러오는 중…' });
     sbGate('연결 중…');
-    const logs = await sbFetchAll(client, 'prod_logs', q => q.is('deleted_at', null), n => sbGateMsg('생산 기록 ' + n.toLocaleString() + '건 받는 중…'));
+    // 이 PC에 보관본이 있으면: 보관본을 바로 적용하고 서버에서 바뀐 것만 받음
+    let cache = null;
+    try { cache = await loadFromIndexedDB(SB_CACHE_KEY); } catch (e) {}
+    if (cache && cache.v === 1 && cache.section === SB_SECTION && cache.url === (client.supabaseUrl || '') && cache.lastPull && Date.now() - (cache.savedAt || 0) < 3 * 24 * 3600 * 1000) {
+      try {
+        sbGateMsg('이 PC 보관본 적용 중…');
+        S.synced.logs = new Map(cache.logs || []); S.synced.state = new Map(cache.state || []);
+        const arrs = { productionLogs: [], downtimeLogs: [], defectLogs: [], reworkLogs: [] };
+        S.synced.logs.forEach((js, key) => { const k = SB_LOG_KINDS[key.slice(0, key.indexOf(':'))]; if (k) arrs[k].push(JSON.parse(js)); });
+        Object.keys(arrs).forEach(k => sbSetters[k](arrs[k]));
+        setProcessDefectLogs([]);
+        S.synced.state.forEach((js, key) => { if (sbSetters[key]) sbSetters[key](JSON.parse(js)); });
+        S.lastPull = cache.lastPull; S.ready = true;
+        sbGateMsg('서버에서 바뀐 것만 받는 중…');
+        const n = await sbPullDelta(true);
+        setSbStatus({ st: 'ok', msg: '서버 불러옴 ' + new Date().toLocaleTimeString() + ' (바뀐 ' + (n || 0) + '건)' });
+        sbCacheSave();
+        sbGate(null);
+        return;
+      } catch (e) { console.warn('보관본으로 시작 실패 — 전체 다시 받기', e); S.ready = false; }
+    }
+    const logs = await sbFetchAll(client, 'prod_logs', q => q.is('deleted_at', null), (n, t) => sbGateMsg('생산 기록 ' + n.toLocaleString() + ' / ' + (t || n).toLocaleString() + '건 받는 중…'));
     sbGateMsg('설정·인원 받는 중…');
     const states = await sbFetchAll(client, 'prod_state');
     S.synced.logs = new Map(); S.synced.state = new Map();
@@ -1975,12 +2020,14 @@ function MFGProductionApp() {
       return;
     }
     const arrs = { productionLogs: [], downtimeLogs: [], defectLogs: [], reworkLogs: [] };
-    logs.forEach(r => { const k = SB_LOG_KINDS[r.kind]; if (!k) return; arrs[k].push(r.data); S.synced.logs.set(r.kind + ':' + r.id, sbCanon(r.data)); });
+    const seenKeys = new Set();   // 같은 행이 두 번 와도 한 번만
+    logs.forEach(r => { const k = SB_LOG_KINDS[r.kind]; if (!k) return; const key = r.kind + ':' + r.id; if (seenKeys.has(key)) return; seenKeys.add(key); arrs[k].push(r.data); S.synced.logs.set(key, sbCanon(r.data)); });
     Object.keys(arrs).forEach(k => sbSetters[k](arrs[k]));
     setProcessDefectLogs([]);
     states.forEach(r => { if (sbSetters[r.key]) { sbSetters[r.key](r.data); S.synced.state.set(r.key, sbCanon(r.data)); } });
     S.lastPull = sbMaxTs(logs.concat(states), '1970-01-01T00:00:00Z');
     S.ready = true;
+    sbCacheSave();
     setSbStatus({ st: 'ok', msg: '서버 불러옴 ' + new Date().toLocaleTimeString() + ' (' + logs.length + '건)' });
     sbGate(null);
   };
@@ -4307,7 +4354,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V081S"))));
+    }, "V082S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4355,7 +4402,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V081S")), React.createElement("div", {
+  }, "V082S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
