@@ -17,7 +17,7 @@
 <script>
 (function() {
   var APP_NAME = 'TCP 생산관리 시스템';
-  var APP_VER = 'V086S';
+  var APP_VER = 'V087S';
   var SB_DEFAULT_URL = 'https://tmbeaswlpvsyjehacgsa.supabase.co';
   var SB_DEFAULT_KEY = 'sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9';
   var CFG_KEY = 'mfg-sb-test-cfg', AUTH_KEY = 'mfg-sb-test-auth', LAST_EMAIL = 'mfg-sb-test-last-email';
@@ -2186,6 +2186,30 @@ function MFGProductionApp() {
     const t = setTimeout(() => sbPush(false), 1500);
     return () => clearTimeout(t);
   }, [productionLogs, downtimeLogs, defectLogs, processDefectLogs, reworkLogs, settings, employees, oeeTargets, lineAssignments, slotStatus, skillData, absenceReasons, lotData, lotHiddenBoms, otVacationData, rosterV2, isLoading]);
+  // 백업: 서버 데이터를 Google 공유저장소에 백업 파일로 남김 — 모든 PC 통틀어 3시간에 1개, 최근 60개 보관
+  const sbDriveBkRef = React.useRef(0);
+  useEffect(() => {
+    if (isLoading || !sbRef.current.ready) return;
+    const t = setTimeout(async () => {
+      if (Date.now() - sbDriveBkRef.current < 30 * 60000) return;   // 이 PC는 30분에 한 번만 확인
+      sbDriveBkRef.current = Date.now();
+      try {
+        const GAS_URL = 'https://script.google.com/macros/s/AKfycbxLFrxbAaBt1bBa3SUdDY9wY48tvt85mEDaj3tiKhyw_R7oJCC9GbOWLfWbdSohnQtB/exec';
+        const pre = SB_SECTION.toLowerCase() + '-backup-';
+        const lj = await (await fetch(GAS_URL + '?action=list&prefix=' + pre + '&limit=3&_=' + Date.now())).json();
+        const newest = ((lj && lj.files) || []).map(f => new Date(f.modified).getTime()).filter(x => x > 0).sort((a, b) => b - a)[0] || 0;
+        if (Date.now() - newest < 3 * 3600000) return;
+        const L = latestRef.current;
+        const data = { ...L, processDefectLogs: [], savedAt: Date.now(), source: 'server' };
+        const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        const gz = typeof CompressionStream !== 'undefined';
+        await fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ filename: pre + ts + (gz ? '.json.gz' : '.json'), data: gz ? await __gzipToB64(data) : data }) });
+        console.log('공유저장소 백업 완료', pre + ts);
+        __pruneOldBackups(GAS_URL, pre, 60);
+      } catch (e) { console.warn('공유저장소 백업 실패 (다음에 다시 시도)', e); sbDriveBkRef.current = Date.now() - 20 * 60000; }
+    }, 60000);
+    return () => clearTimeout(t);
+  }, [productionLogs, downtimeLogs, defectLogs, reworkLogs, settings, employees, oeeTargets, lineAssignments, slotStatus, skillData, absenceReasons, lotData, lotHiddenBoms, otVacationData, rosterV2, isLoading]);
   // Google 공유저장소의 최신 백업을 가져와 서버 데이터로 교체 (관리자, 이관용)
   const importFromGoogle = async () => {
     if (!confirm('Google 공유저장소의 최신 TCP 백업을 가져와 이 서버의 데이터로 바꿉니다.\n(Google 원본은 변경하지 않습니다. 이 서버에만 있던 입력은 사라집니다.)\n\n진행할까요?')) return;
@@ -4480,7 +4504,7 @@ function MFGProductionApp() {
       className: "text-gray-500"
     }, "데이터를 불러오는 중... ", React.createElement("span", {
       className: "text-xs font-mono text-gray-400"
-    }, "V086S"))));
+    }, "V087S"))));
   }
   return React.createElement("div", {
     className: "w-full h-screen bg-gray-100 flex flex-col",
@@ -4528,7 +4552,7 @@ function MFGProductionApp() {
     className: "text-2xl font-bold"
   }, "TCP 생산관리 시스템"), React.createElement("span", {
     className: "ml-2 px-2 py-0.5 bg-white/20 rounded text-xs font-mono font-bold align-middle"
-  }, "V086S")), React.createElement("div", {
+  }, "V087S")), React.createElement("div", {
     className: "text-right"
   }, React.createElement("div", {
     className: "text-sm opacity-80"
